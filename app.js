@@ -71,47 +71,13 @@ function preprocessCanvas(inputCanvas) {
   ctx.drawImage(inputCanvas, 0, 0, out.width, out.height);
 
   const img = ctx.getImageData(0, 0, out.width, out.height);
-  const hist = new Array(256).fill(0);
-
   for (let i = 0; i < img.data.length; i += 4) {
     const g = Math.round((img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3);
-    img.data[i] = g;
-    img.data[i + 1] = g;
-    img.data[i + 2] = g;
-    hist[g] += 1;
-  }
-
-  let sum = 0;
-  for (let t = 0; t < 256; t += 1) sum += t * hist[t];
-
-  let sumB = 0;
-  let wB = 0;
-  let maxVar = 0;
-  let threshold = 128;
-  const total = out.width * out.height;
-
-  for (let t = 0; t < 256; t += 1) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    const wF = total - wB;
-    if (wF === 0) break;
-
-    sumB += t * hist[t];
-    const mB = sumB / wB;
-    const mF = (sum - sumB) / wF;
-    const between = wB * wF * (mB - mF) * (mB - mF);
-
-    if (between > maxVar) {
-      maxVar = between;
-      threshold = t;
-    }
-  }
-
-  for (let i = 0; i < img.data.length; i += 4) {
-    const g = img.data[i] > threshold ? 255 : 0;
-    img.data[i] = g;
-    img.data[i + 1] = g;
-    img.data[i + 2] = g;
+    const centered = g - 128;
+    const contrast = clamp(128 + centered * 1.28, 0, 255);
+    img.data[i] = contrast;
+    img.data[i + 1] = contrast;
+    img.data[i + 2] = contrast;
   }
 
   ctx.putImageData(img, 0, 0);
@@ -244,6 +210,7 @@ async function ocrCanvas(canvas, psm = 6) {
   await w.setParameters({
     tessedit_pageseg_mode: String(psm),
     preserve_interword_spaces: "1",
+    user_defined_dpi: "300",
   });
 
   const direct = await w.recognize(canvas);
@@ -285,6 +252,96 @@ function pickConsensus(readings) {
   return normalizeText(winner.text);
 }
 
+function bestSuffixPrefixOverlap(left, right, minLen = 3) {
+  const a = normalizeForConsensus(left);
+  const b = normalizeForConsensus(right);
+  const maxLen = Math.min(a.length, b.length, 28);
+
+  for (let len = maxLen; len >= minLen; len -= 1) {
+    const suffix = a.slice(-len);
+    const prefix = b.slice(0, len);
+    if (suffix === prefix) {
+      return suffix;
+    }
+  }
+
+  return "";
+}
+
+function isInformativeAnchor(anchor) {
+  if (!anchor || anchor.length < 3) return false;
+  const unique = new Set(anchor.split(""));
+  const alnum = anchor.replace(/[^A-Z0-9]/g, "");
+  if (alnum.length < 3) return false;
+  if (unique.size < 2 && anchor.length < 6) return false;
+  return true;
+}
+
+function getAnchorStats(leftReads, rightReads) {
+  const stats = new Map();
+
+  for (const l of leftReads) {
+    for (const r of rightReads) {
+      const anchor = bestSuffixPrefixOverlap(l.text, r.text, 3);
+      if (!isInformativeAnchor(anchor)) continue;
+
+      if (!stats.has(anchor)) {
+        stats.set(anchor, { anchor, support: 0, score: 0 });
+      }
+
+      const item = stats.get(anchor);
+      item.support += 1;
+      item.score += (l.confidence / 100) + (r.confidence / 100) + l.quality + r.quality;
+    }
+  }
+
+  if (!stats.size) return null;
+
+  return [...stats.values()].sort((a, b) => {
+    if (b.support !== a.support) return b.support - a.support;
+    if (b.anchor.length !== a.anchor.length) return b.anchor.length - a.anchor.length;
+    return b.score - a.score;
+  })[0];
+}
+
+function mergeWithAnchor(left, right, anchor) {
+  const a = normalizeText(left);
+  const b = normalizeText(right);
+  const an = normalizeForConsensus(anchor);
+  if (!an) return normalizeText(`${a} ${b}`);
+
+  const aNorm = normalizeForConsensus(a);
+  const bNorm = normalizeForConsensus(b);
+  const idxA = aNorm.lastIndexOf(an);
+  const idxB = bNorm.indexOf(an);
+
+  if (idxA < 0 || idxB < 0) return normalizeText(`${a} ${b}`);
+
+  const cutA = a.slice(0, idxA + an.length);
+  const tailB = b.slice(idxB + an.length);
+  return normalizeText(`${cutA}${tailB ? ` ${tailB}` : ""}`);
+}
+
+function assembleRowFromPieces(pieces) {
+  if (!pieces.length) return "";
+  pieces.sort((a, b) => a.col - b.col);
+
+  let line = pieces[0].consensus;
+  for (let i = 1; i < pieces.length; i += 1) {
+    const left = pieces[i - 1];
+    const right = pieces[i];
+    const anchor = getAnchorStats(left.reads, right.reads);
+
+    if (anchor && anchor.support >= 2 && anchor.anchor.length >= 3) {
+      line = mergeWithAnchor(line, right.consensus, anchor.anchor);
+    } else {
+      line = normalizeText(`${line} ${right.consensus}`);
+    }
+  }
+
+  return line;
+}
+
 async function buildZoneRawFallback(zones, candidatesByZone) {
   const rowPieces = new Map();
 
@@ -295,7 +352,7 @@ async function buildZoneRawFallback(zones, candidatesByZone) {
     const reads = [];
     for (const c of list) {
       const res = await ocrCanvas(c.zoneCanvas, 7);
-      if (res.confidence < 12 || !res.text) continue;
+      if (res.confidence < 15 || !res.text || res.text.length < 2) continue;
       reads.push({ text: res.text, confidence: res.confidence, quality: c.quality });
     }
 
@@ -303,15 +360,14 @@ async function buildZoneRawFallback(zones, candidatesByZone) {
     if (!consensus) continue;
 
     if (!rowPieces.has(zone.row)) rowPieces.set(zone.row, []);
-    rowPieces.get(zone.row).push({ col: zone.col, text: consensus });
+    rowPieces.get(zone.row).push({ col: zone.col, consensus, reads });
   }
 
   const rows = [...rowPieces.entries()].sort((a, b) => a[0] - b[0]);
   const lines = [];
 
   for (const [, pieces] of rows) {
-    pieces.sort((a, b) => a.col - b.col);
-    const line = normalizeText(pieces.map((p) => p.text).join(" "));
+    const line = assembleRowFromPieces(pieces);
     if (line) lines.push(line);
   }
 
@@ -463,7 +519,10 @@ async function captureAndComposeRawOCR() {
     const whole = await ocrCanvas(composite, 6);
     const zoneMerged = await buildZoneRawFallback(zones, byZone);
 
-    const finalText = mergeRawTexts(whole.text, zoneMerged) || whole.text || zoneMerged;
+    const finalText =
+      (whole.confidence >= 35 ? mergeRawTexts(whole.text, zoneMerged) : mergeRawTexts(zoneMerged, whole.text)) ||
+      zoneMerged ||
+      whole.text;
     finalRaw.textContent = finalText || "No se obtuvo texto útil.";
   } catch (error) {
     finalRaw.textContent = `Error: ${error.message}`;
