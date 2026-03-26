@@ -44,8 +44,8 @@ h2 {
 .video-wrap {
   position: relative;
   width: 100%;
-  aspect-ratio: var(--video-ratio, 4 / 3);
-  max-height: 64vh;
+  aspect-ratio: var(--video-ratio, 3 / 4);
+  max-height: 72vh;
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
@@ -140,6 +140,7 @@ pre {
   }
 
   .video-wrap {
-    max-height: 48vh;
+    aspect-ratio: 3 / 4;
+    max-height: 66vh;
   }
 }

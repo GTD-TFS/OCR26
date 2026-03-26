@@ -15,17 +15,9 @@ const finalResultEl = document.getElementById("finalResult");
 const zoneReadingsEl = document.getElementById("zoneReadings");
 
 const DEFAULT_TEMPLATE = {
-  id: "id-card-es-generic",
-  documentRoi: { x: 0.08, y: 0.12, w: 0.84, h: 0.72 },
-  zones: [
-    { id: "nombre", x: 0.08, y: 0.18, w: 0.42, h: 0.1, psm: 7, kind: "name" },
-    { id: "apellidos", x: 0.08, y: 0.29, w: 0.52, h: 0.12, psm: 7, kind: "name" },
-    { id: "numero_documento", x: 0.56, y: 0.18, w: 0.36, h: 0.1, psm: 7, kind: "docNumber" },
-    { id: "fecha_nacimiento", x: 0.56, y: 0.3, w: 0.3, h: 0.09, psm: 7, kind: "date" },
-    { id: "sexo", x: 0.86, y: 0.3, w: 0.06, h: 0.09, psm: 10, kind: "sex" },
-    { id: "nacionalidad", x: 0.56, y: 0.4, w: 0.3, h: 0.09, psm: 7, kind: "nationality" },
-    { id: "mrz", x: 0.08, y: 0.77, w: 0.84, h: 0.18, psm: 6, kind: "mrz" },
-  ],
+  id: "generic-scan",
+  documentRoi: { x: 0.05, y: 0.08, w: 0.9, h: 0.84 },
+  zones: [],
 };
 
 const FIELD_RULES = {
@@ -57,8 +49,40 @@ let busy = false;
 let tesseractWorker = null;
 
 function updateVideoLayout() {
+  const isPortraitScreen = window.matchMedia("(orientation: portrait)").matches;
+  if (isPortraitScreen) {
+    document.documentElement.style.setProperty("--video-ratio", "3 / 4");
+    return;
+  }
   if (!video.videoWidth || !video.videoHeight) return;
   document.documentElement.style.setProperty("--video-ratio", `${video.videoWidth} / ${video.videoHeight}`);
+}
+
+function getActiveZones() {
+  if (Array.isArray(template.zones) && template.zones.length > 0) {
+    return template.zones;
+  }
+  // Modo genérico: se divide el documento en rejilla para fusionar OCR por zonas sin asumir tipo de documento.
+  const cols = 3;
+  const rows = 4;
+  const zones = [];
+  const margin = 0.012;
+  const cellW = 1 / cols;
+  const cellH = 1 / rows;
+  for (let r = 0; r < rows; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      zones.push({
+        id: `z_${r + 1}_${c + 1}`,
+        x: c * cellW + margin,
+        y: r * cellH + margin,
+        w: cellW - margin * 2,
+        h: cellH - margin * 2,
+        psm: 6,
+        kind: "raw",
+      });
+    }
+  }
+  return zones;
 }
 
 function logStatus(message, data) {
@@ -94,8 +118,7 @@ async function startCamera() {
   stream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: { ideal: "environment" },
-      width: isPortraitScreen ? { ideal: 1080 } : { ideal: 1920 },
-      height: isPortraitScreen ? { ideal: 1920 } : { ideal: 1080 },
+      aspectRatio: { ideal: isPortraitScreen ? 0.75 : 1.777 },
     },
     audio: false,
   });
@@ -148,7 +171,8 @@ function drawOverlay() {
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = "rgba(46, 212, 138, 0.7)";
 
-  for (const zone of template.zones) {
+  const zones = getActiveZones();
+  for (const zone of zones) {
     const zx = px + zone.x * pw;
     const zy = py + zone.y * ph;
     const zw = zone.w * pw;
@@ -560,7 +584,7 @@ function renderOutputs(result, readingsByZone) {
         };
       }
 
-      const kind = template.zones.find((z) => z.id === zoneId)?.kind;
+      const kind = getActiveZones().find((z) => z.id === zoneId)?.kind;
       return {
         frame: r.frameIndex,
         tsMs: r.tsMs,
@@ -598,6 +622,11 @@ async function captureAndProcess() {
 
     logStatus(`Inicio captura modo=${mode} ventana=${windowMs}ms sample=${sampleMs}ms qMin=${minZoneQuality}`);
 
+    const activeZones = getActiveZones();
+    if (!template.zones.length) {
+      logStatus(`Sin plantilla de campos: usando rejilla automática ${activeZones.length} zonas`);
+    }
+
     const frames = [];
     const start = performance.now();
     let nextShot = start;
@@ -615,7 +644,7 @@ async function captureAndProcess() {
           h: docRoiNorm.h * baseCanvas.height,
         };
 
-        const zoneEvals = template.zones.map((zone) => {
+        const zoneEvals = activeZones.map((zone) => {
           const zonePx = toPixelsRect(zone, docRectPx);
           const zoneCanvas = cropCanvas(baseCanvas, zonePx);
           const quality = qualityMetrics(zoneCanvas);
@@ -646,16 +675,16 @@ async function captureAndProcess() {
       throw new Error("No se capturaron frames");
     }
 
-    const candidatesByZone = collectZoneCandidates(frames, template.zones, minZoneQuality);
+    const candidatesByZone = collectZoneCandidates(frames, activeZones, minZoneQuality);
 
     for (const [zoneId, cands] of Object.entries(candidatesByZone)) {
       const usable = cands.filter((c) => c.includeInOcr).length;
       logStatus(`Zona ${zoneId}: muestras=${cands.length} paraOCR=${usable}`);
     }
 
-    const zonesById = Object.fromEntries(template.zones.map((z) => [z.id, z]));
+    const zonesById = Object.fromEntries(activeZones.map((z) => [z.id, z]));
     const readingsByZone = await runZoneOCR(candidatesByZone, zonesById);
-    const result = buildFinalByPieces(template.zones, readingsByZone);
+    const result = buildFinalByPieces(activeZones, readingsByZone);
 
     renderOutputs(result, readingsByZone);
     logStatus("OCR por zonas completado");
