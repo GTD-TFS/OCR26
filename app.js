@@ -189,6 +189,60 @@ async function ocrCanvas(canvas) {
   return eConf > dConf ? { text: eText, confidence: eConf } : { text: dText, confidence: dConf };
 }
 
+function addWhiteBorder(inputCanvas, border = 10) {
+  const out = document.createElement("canvas");
+  out.width = inputCanvas.width + border * 2;
+  out.height = inputCanvas.height + border * 2;
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(inputCanvas, border, border);
+  return out;
+}
+
+async function ocrZone(canvas) {
+  const w = await ensureWorker();
+  await w.setParameters({
+    tessedit_pageseg_mode: "7",
+    preserve_interword_spaces: "1",
+    user_defined_dpi: "300",
+  });
+  const withBorder = addWhiteBorder(canvas, 10);
+  const direct = await w.recognize(withBorder);
+  const enhanced = await w.recognize(preprocessCanvas(withBorder));
+
+  const dText = normalizeText(direct.data?.text || "");
+  const eText = normalizeText(enhanced.data?.text || "");
+  const dConf = Number(direct.data?.confidence || 0);
+  const eConf = Number(enhanced.data?.confidence || 0);
+  return eConf > dConf ? { text: eText, confidence: eConf } : { text: dText, confidence: dConf };
+}
+
+function bestOverlap(a, b, minLen = 3) {
+  const left = normalizeText(a).toUpperCase();
+  const right = normalizeText(b).toUpperCase();
+  const maxLen = Math.min(left.length, right.length, 24);
+  for (let len = maxLen; len >= minLen; len -= 1) {
+    if (left.slice(-len) === right.slice(0, len)) return left.slice(-len);
+  }
+  return "";
+}
+
+function mergeByOverlap(left, right) {
+  const l = normalizeText(left);
+  const r = normalizeText(right);
+  const ov = bestOverlap(l, r, 3);
+  if (!ov) return normalizeText(`${l} ${r}`);
+  const lNorm = l.toUpperCase();
+  const rNorm = r.toUpperCase();
+  const li = lNorm.lastIndexOf(ov);
+  const ri = rNorm.indexOf(ov);
+  if (li < 0 || ri < 0) return normalizeText(`${l} ${r}`);
+  const partL = l.slice(0, li + ov.length);
+  const partR = r.slice(ri + ov.length);
+  return normalizeText(`${partL}${partR ? ` ${partR}` : ""}`);
+}
+
 async function captureFrames() {
   const frames = [];
   const start = performance.now();
@@ -343,13 +397,32 @@ async function captureAndComposeRawOCR() {
     if (!frames.length) throw new Error("No se capturaron frames legibles");
 
     const mosaic = buildMosaic(frames);
-    const result = await ocrCanvas(mosaic);
+    const zones = buildZones(mosaic.width, mosaic.height);
+    const byRow = new Map();
 
-    if (!result.text || result.confidence < 25) {
-      finalRaw.textContent = "No legible todavía. Acércate, usa zoom y mueve más lento.";
-    } else {
-      finalRaw.textContent = result.text;
+    for (const zone of zones) {
+      const patch = cropCanvas(mosaic, zone);
+      const q = quality(patch);
+      if (q < SETTINGS.minZoneQuality) continue;
+      const o = await ocrZone(patch);
+      if (!o.text || o.confidence < 28) continue;
+      if (!byRow.has(zone.id.split("_")[1])) byRow.set(zone.id.split("_")[1], []);
+      byRow.get(zone.id.split("_")[1]).push({ col: Number(zone.id.split("_")[2]), text: o.text, confidence: o.confidence });
     }
+
+    const rows = [...byRow.entries()].sort((a, b) => Number(a[0]) - Number(b[0]));
+    const lines = [];
+    for (const [, items] of rows) {
+      items.sort((a, b) => a.col - b.col);
+      let line = items[0]?.text || "";
+      for (let i = 1; i < items.length; i += 1) {
+        line = mergeByOverlap(line, items[i].text);
+      }
+      if (line && line.length >= 2) lines.push(line);
+    }
+
+    const finalText = lines.join("\n").trim();
+    finalRaw.textContent = finalText || "No legible todavía. Acércate, usa zoom y mueve más lento.";
   } catch (error) {
     finalRaw.textContent = `Error: ${error.message}`;
   } finally {
