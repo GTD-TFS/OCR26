@@ -8,17 +8,14 @@ const refocusBtn = document.getElementById("refocusBtn");
 const focusState = document.getElementById("focusState");
 
 const SETTINGS = {
-  windowMs: 4500,
-  sampleMs: 180,
-  maxFrames: 20,
-  minFrameQuality: 0.28,
-  minZoneQuality: 0.24,
-  minTextConfidence: 30,
-  minTextLength: 2,
-  minSupport: 2,
-  gridCols: 3,
-  gridRows: 5,
-  zoneMargin: 0.02,
+  windowMs: 5200,
+  sampleMs: 140,
+  maxFrames: 28,
+  minFrameQuality: 0.2,
+  minZoneQuality: 0.14,
+  gridCols: 4,
+  gridRows: 6,
+  overlap: 0.35,
 };
 
 let stream = null;
@@ -38,14 +35,6 @@ function normalizeText(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
-function canonicalText(s) {
-  return normalizeText(s)
-    .toUpperCase()
-    .replace(/[|]/g, "I")
-    .replace(/[“”"'`´]/g, "")
-    .replace(/\s+/g, " ");
-}
-
 function frameToCanvas(videoEl) {
   const canvas = document.createElement("canvas");
   canvas.width = videoEl.videoWidth;
@@ -53,28 +42,6 @@ function frameToCanvas(videoEl) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
   return canvas;
-}
-
-function preprocessCanvas(inputCanvas) {
-  const scale = inputCanvas.width < 900 ? 2 : 1;
-  const out = document.createElement("canvas");
-  out.width = Math.round(inputCanvas.width * scale);
-  out.height = Math.round(inputCanvas.height * scale);
-
-  const ctx = out.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(inputCanvas, 0, 0, out.width, out.height);
-
-  const img = ctx.getImageData(0, 0, out.width, out.height);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const g = Math.round((img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3);
-    const centered = g - 128;
-    const contrast = clamp(128 + centered * 1.35, 0, 255);
-    img.data[i] = contrast;
-    img.data[i + 1] = contrast;
-    img.data[i + 2] = contrast;
-  }
-  ctx.putImageData(img, 0, 0);
-  return out;
 }
 
 function cropCanvas(sourceCanvas, rect) {
@@ -90,7 +57,27 @@ function cropCanvas(sourceCanvas, rect) {
   return out;
 }
 
-function frameQuality(canvas) {
+function preprocessCanvas(inputCanvas) {
+  const scale = inputCanvas.width < 1000 ? 2 : 1;
+  const out = document.createElement("canvas");
+  out.width = Math.round(inputCanvas.width * scale);
+  out.height = Math.round(inputCanvas.height * scale);
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(inputCanvas, 0, 0, out.width, out.height);
+
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const g = Math.round((img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3);
+    const c = clamp(128 + (g - 128) * 1.22, 0, 255);
+    img.data[i] = c;
+    img.data[i + 1] = c;
+    img.data[i + 2] = c;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+function quality(canvas) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
@@ -121,55 +108,25 @@ function frameQuality(canvas) {
 
   const sharp = clamp(grad / Math.max(1, (width - 2) * (height - 2) * 24), 0, 1);
   const contrast = clamp(variance / 2400, 0, 1);
-  return clamp(0.68 * sharp + 0.32 * contrast, 0, 1);
-}
-
-function levenshtein(a, b) {
-  const s = a || "";
-  const t = b || "";
-  const m = s.length;
-  const n = t.length;
-  if (!m) return n;
-  if (!n) return m;
-
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i += 1) dp[i][0] = i;
-  for (let j = 0; j <= n; j += 1) dp[0][j] = j;
-
-  for (let i = 1; i <= m; i += 1) {
-    for (let j = 1; j <= n; j += 1) {
-      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
-    }
-  }
-
-  return dp[m][n];
-}
-
-function similarity(a, b) {
-  const s = canonicalText(a);
-  const t = canonicalText(b);
-  if (!s || !t) return 0;
-  const dist = levenshtein(s, t);
-  return 1 - dist / Math.max(s.length, t.length);
+  return clamp(0.7 * sharp + 0.3 * contrast, 0, 1);
 }
 
 function buildZones(frameW, frameH) {
   const zones = [];
-  const cellW = frameW / SETTINGS.gridCols;
-  const cellH = frameH / SETTINGS.gridRows;
+  const tileW = frameW / SETTINGS.gridCols;
+  const tileH = frameH / SETTINGS.gridRows;
+  const stepW = tileW * (1 - SETTINGS.overlap);
+  const stepH = tileH * (1 - SETTINGS.overlap);
 
   for (let r = 0; r < SETTINGS.gridRows; r += 1) {
     for (let c = 0; c < SETTINGS.gridCols; c += 1) {
-      zones.push({
-        id: `z_${r}_${c}`,
-        row: r,
-        col: c,
-        x: c * cellW + cellW * SETTINGS.zoneMargin,
-        y: r * cellH + cellH * SETTINGS.zoneMargin,
-        w: cellW * (1 - SETTINGS.zoneMargin * 2),
-        h: cellH * (1 - SETTINGS.zoneMargin * 2),
-      });
+      let x = Math.round(c * stepW);
+      let y = Math.round(r * stepH);
+      const w = Math.round(tileW);
+      const h = Math.round(tileH);
+      if (x + w > frameW) x = frameW - w;
+      if (y + h > frameH) y = frameH - h;
+      zones.push({ id: `z_${r}_${c}`, row: r, col: c, x, y, w, h });
     }
   }
 
@@ -187,129 +144,17 @@ async function ensureWorker() {
   return worker;
 }
 
-async function ocrZone(canvas) {
+async function ocrCanvas(canvas) {
   const w = await ensureWorker();
-
   const direct = await w.recognize(canvas);
-  const enhancedCanvas = preprocessCanvas(canvas);
-  const enhanced = await w.recognize(enhancedCanvas);
+  const enhanced = await w.recognize(preprocessCanvas(canvas));
 
   const dText = normalizeText(direct.data?.text || "");
   const eText = normalizeText(enhanced.data?.text || "");
   const dConf = Number(direct.data?.confidence || 0);
   const eConf = Number(enhanced.data?.confidence || 0);
 
-  if (eConf > dConf) return { text: eText, confidence: eConf };
-  return { text: dText, confidence: dConf };
-}
-
-function bestSuffixPrefixOverlap(left, right, minLen = 3) {
-  const a = canonicalText(left);
-  const b = canonicalText(right);
-  const maxLen = Math.min(a.length, b.length, 24);
-
-  for (let len = maxLen; len >= minLen; len -= 1) {
-    if (a.slice(-len) === b.slice(0, len)) return a.slice(-len);
-  }
-
-  return "";
-}
-
-function informativeOverlap(s) {
-  if (!s || s.length < 3) return false;
-  const uniq = new Set(s.split(""));
-  return uniq.size >= 2;
-}
-
-function pickZoneConsensus(reads) {
-  const groups = [];
-
-  for (const r of reads) {
-    const text = normalizeText(r.text);
-    if (!text || text.length < SETTINGS.minTextLength) continue;
-    if (r.confidence < SETTINGS.minTextConfidence) continue;
-
-    let target = null;
-    for (const g of groups) {
-      if (similarity(text, g.text) >= 0.8) {
-        target = g;
-        break;
-      }
-    }
-
-    if (!target) {
-      groups.push({
-        text,
-        support: 1,
-        score: (r.confidence / 100) + r.quality,
-        bestConfidence: r.confidence,
-      });
-      continue;
-    }
-
-    target.support += 1;
-    target.score += (r.confidence / 100) + r.quality;
-    if (r.confidence > target.bestConfidence) {
-      target.bestConfidence = r.confidence;
-      target.text = text;
-    }
-  }
-
-  if (!groups.length) return null;
-  return groups.sort((a, b) => b.support - a.support || b.score - a.score)[0];
-}
-
-function anchorBetween(leftReads, rightReads) {
-  const bag = new Map();
-  for (const l of leftReads) {
-    for (const r of rightReads) {
-      const o = bestSuffixPrefixOverlap(l.text, r.text, 3);
-      if (!informativeOverlap(o)) continue;
-      const k = o;
-      if (!bag.has(k)) bag.set(k, { overlap: o, support: 0, score: 0 });
-      const item = bag.get(k);
-      item.support += 1;
-      item.score += (l.confidence / 100) + (r.confidence / 100);
-    }
-  }
-  if (!bag.size) return null;
-  return [...bag.values()].sort((a, b) => b.support - a.support || b.overlap.length - a.overlap.length || b.score - a.score)[0];
-}
-
-function mergeByOverlap(a, b, overlap) {
-  const left = normalizeText(a);
-  const right = normalizeText(b);
-  const ov = canonicalText(overlap);
-  if (!ov) return normalizeText(`${left} ${right}`);
-
-  const lNorm = canonicalText(left);
-  const rNorm = canonicalText(right);
-  const idxL = lNorm.lastIndexOf(ov);
-  const idxR = rNorm.indexOf(ov);
-  if (idxL < 0 || idxR < 0) return normalizeText(`${left} ${right}`);
-
-  const leftPart = left.slice(0, idxL + ov.length);
-  const rightTail = right.slice(idxR + ov.length);
-  return normalizeText(`${leftPart}${rightTail ? ` ${rightTail}` : ""}`);
-}
-
-function assembleRow(pieces) {
-  if (!pieces.length) return "";
-  pieces.sort((a, b) => a.col - b.col);
-  let out = pieces[0].consensus.text;
-
-  for (let i = 1; i < pieces.length; i += 1) {
-    const left = pieces[i - 1];
-    const right = pieces[i];
-    const anchor = anchorBetween(left.reads, right.reads);
-    if (anchor && anchor.support >= SETTINGS.minSupport) {
-      out = mergeByOverlap(out, right.consensus.text, anchor.overlap);
-    } else {
-      out = normalizeText(`${out} ${right.consensus.text}`);
-    }
-  }
-
-  return out;
+  return eConf > dConf ? { text: eText, confidence: eConf } : { text: dText, confidence: dConf };
 }
 
 async function captureFrames() {
@@ -322,7 +167,7 @@ async function captureFrames() {
     const now = performance.now();
     if (now >= nextShot) {
       const canvas = frameToCanvas(video);
-      const q = frameQuality(canvas);
+      const q = quality(canvas);
       if (q >= SETTINGS.minFrameQuality) {
         frames.push({ index: idx, canvas, quality: q });
       }
@@ -335,10 +180,38 @@ async function captureFrames() {
   return frames;
 }
 
+function buildMosaic(frames) {
+  const frameW = frames[0].canvas.width;
+  const frameH = frames[0].canvas.height;
+  const zones = buildZones(frameW, frameH);
+
+  const out = document.createElement("canvas");
+  out.width = frameW;
+  out.height = frameH;
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+
+  for (const zone of zones) {
+    let best = null;
+
+    for (const frame of frames) {
+      const patch = cropCanvas(frame.canvas, zone);
+      const q = quality(patch);
+      if (!best || q > best.q) {
+        best = { patch, q };
+      }
+    }
+
+    if (!best || best.q < SETTINGS.minZoneQuality) continue;
+
+    ctx.drawImage(best.patch, 0, 0, best.patch.width, best.patch.height, zone.x, zone.y, zone.w, zone.h);
+  }
+
+  return out;
+}
+
 function updateFocusIndicator() {
   if (!video.videoWidth || !video.videoHeight) return;
-  const frame = frameToCanvas(video);
-  const q = frameQuality(frame);
+  const q = quality(frameToCanvas(video));
   focusState.textContent = `Foco: ${Math.round(q * 100)}%`;
 }
 
@@ -347,7 +220,7 @@ async function applyTrackConstraints(constraints) {
   try {
     await track.applyConstraints({ advanced: [constraints] });
   } catch {
-    // dispositivo sin soporte
+    // ignore
   }
 }
 
@@ -427,51 +300,20 @@ async function captureAndComposeRawOCR() {
   if (!stream) return;
 
   captureBtn.disabled = true;
-  finalRaw.textContent = "Procesando OCR...";
+  finalRaw.textContent = "Procesando OCR por zonas...";
 
   try {
     const frames = await captureFrames();
     if (!frames.length) throw new Error("No se capturaron frames legibles");
 
-    const zones = buildZones(frames[0].canvas.width, frames[0].canvas.height);
-    const rowMap = new Map();
+    const mosaic = buildMosaic(frames);
+    const result = await ocrCanvas(mosaic);
 
-    for (const zone of zones) {
-      const candidates = [];
-      for (const frame of frames) {
-        const zoneCanvas = cropCanvas(frame.canvas, zone);
-        const q = frameQuality(zoneCanvas);
-        if (q < SETTINGS.minZoneQuality) continue;
-        candidates.push({ zoneCanvas, quality: q });
-      }
-
-      candidates.sort((a, b) => b.quality - a.quality);
-      const top = candidates.slice(0, 5);
-      if (!top.length) continue;
-
-      const reads = [];
-      for (const c of top) {
-        const res = await ocrZone(c.zoneCanvas);
-        if (!res.text) continue;
-        reads.push({ text: res.text, confidence: res.confidence, quality: c.quality });
-      }
-
-      const consensus = pickZoneConsensus(reads);
-      if (!consensus || consensus.support < SETTINGS.minSupport) continue;
-
-      if (!rowMap.has(zone.row)) rowMap.set(zone.row, []);
-      rowMap.get(zone.row).push({ col: zone.col, reads, consensus });
+    if (!result.text || result.confidence < 25) {
+      finalRaw.textContent = "No legible todavía. Acércate, usa zoom y mueve más lento.";
+    } else {
+      finalRaw.textContent = result.text;
     }
-
-    const rows = [...rowMap.entries()].sort((a, b) => a[0] - b[0]);
-    const finalLines = [];
-    for (const [, pieces] of rows) {
-      const line = assembleRow(pieces);
-      if (line) finalLines.push(line);
-    }
-
-    const finalText = finalLines.join("\n");
-    finalRaw.textContent = finalText || "No legible todavía. Reenfoca y acerca más.";
   } catch (error) {
     finalRaw.textContent = `Error: ${error.message}`;
   } finally {
