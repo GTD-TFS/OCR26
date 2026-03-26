@@ -12,6 +12,7 @@ const SETTINGS = {
   sampleMs: 140,
   maxFrames: 24,
   minZoneQuality: 0.24,
+  minFrameQuality: 0.32,
   gridCols: 2,
   gridRows: 4,
   zoneMargin: 0.02,
@@ -247,9 +248,9 @@ function pickConsensus(readings) {
     }
   }
 
-  if (!groups.size) return "";
+  if (!groups.size) return { text: "", support: 0, score: 0 };
   const winner = [...groups.values()].sort((a, b) => b.score - a.score || b.count - a.count)[0];
-  return normalizeText(winner.text);
+  return { text: normalizeText(winner.text), support: winner.count, score: winner.score };
 }
 
 function bestSuffixPrefixOverlap(left, right, minLen = 3) {
@@ -357,10 +358,10 @@ async function buildZoneRawFallback(zones, candidatesByZone) {
     }
 
     const consensus = pickConsensus(reads);
-    if (!consensus) continue;
+    if (!consensus.text || consensus.support < 2) continue;
 
     if (!rowPieces.has(zone.row)) rowPieces.set(zone.row, []);
-    rowPieces.get(zone.row).push({ col: zone.col, consensus, reads });
+    rowPieces.get(zone.row).push({ col: zone.col, consensus: consensus.text, reads });
   }
 
   const rows = [...rowPieces.entries()].sort((a, b) => a[0] - b[0]);
@@ -395,7 +396,11 @@ async function captureFrames() {
   while (performance.now() - start < SETTINGS.windowMs && frames.length < SETTINGS.maxFrames) {
     const now = performance.now();
     if (now >= nextShot) {
-      frames.push({ index: idx, canvas: frameToCanvas(video) });
+      const canvas = frameToCanvas(video);
+      const quality = zoneQuality(canvas);
+      if (quality >= SETTINGS.minFrameQuality) {
+        frames.push({ index: idx, canvas, quality });
+      }
       idx += 1;
       nextShot += SETTINGS.sampleMs;
     }
@@ -508,7 +513,7 @@ async function captureAndComposeRawOCR() {
 
   try {
     const frames = await captureFrames();
-    if (!frames.length) throw new Error("No se capturaron frames");
+    if (!frames.length) throw new Error("No se capturaron frames legibles");
 
     const frameW = frames[0].canvas.width;
     const frameH = frames[0].canvas.height;
@@ -520,10 +525,9 @@ async function captureAndComposeRawOCR() {
     const zoneMerged = await buildZoneRawFallback(zones, byZone);
 
     const finalText =
-      (whole.confidence >= 35 ? mergeRawTexts(whole.text, zoneMerged) : mergeRawTexts(zoneMerged, whole.text)) ||
-      zoneMerged ||
-      whole.text;
-    finalRaw.textContent = finalText || "No se obtuvo texto útil.";
+      (whole.confidence >= 45 ? mergeRawTexts(whole.text, zoneMerged) : zoneMerged) ||
+      (whole.confidence >= 55 ? whole.text : "");
+    finalRaw.textContent = finalText || "No legible todavía. Acércate más, usa zoom y reenfoca.";
   } catch (error) {
     finalRaw.textContent = `Error: ${error.message}`;
   } finally {
