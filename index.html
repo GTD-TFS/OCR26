@@ -7,11 +7,11 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>OCR bruto</title>
-    <link rel="stylesheet" href="styles.css?v=20260326-5" />
+    <link rel="stylesheet" href="styles.css?v=20260326-6" />
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <script>
       (function () {
-        const BUILD_ID = "20260326-5";
+        const BUILD_ID = "20260326-6";
         const KEY = "ocr26-build-id";
         const prev = localStorage.getItem(KEY);
         if (prev !== BUILD_ID) {
@@ -19,7 +19,6 @@
           const url = new URL(window.location.href);
           url.searchParams.set("v", BUILD_ID);
           window.location.replace(url.toString());
-          return;
         }
       })();
     </script>
@@ -27,13 +26,24 @@
   <body>
     <main class="app">
       <video id="video" playsinline autoplay muted></video>
+
       <div class="actions">
         <button id="startCameraBtn">Abrir cámara</button>
         <button id="captureBtn" disabled>Capturar OCR</button>
         <button id="stopCameraBtn" disabled>Detener cámara</button>
       </div>
+
+      <div class="camera-tools">
+        <label>
+          Zoom
+          <input id="zoomSlider" type="range" min="1" max="1" step="0.1" value="1" disabled />
+        </label>
+        <button id="refocusBtn" disabled>Reenfocar</button>
+        <div id="focusState">Foco: pendiente</div>
+      </div>
+
       <pre id="finalRaw">Esperando captura...</pre>
     </main>
-    <script type="module" src="app.js?v=20260326-5"></script>
+    <script type="module" src="app.js?v=20260326-6"></script>
   </body>
 </html>
