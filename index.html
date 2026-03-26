@@ -3,9 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>OCR vídeo por zonas</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260326-2" />
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script>
+      (function () {
+        const BUILD_ID = "20260326-2";
+        const KEY = "ocr26-build-id";
+        const prev = localStorage.getItem(KEY);
+
+        if (prev !== BUILD_ID) {
+          localStorage.setItem(KEY, BUILD_ID);
+          const url = new URL(window.location.href);
+          url.searchParams.set("v", BUILD_ID);
+          window.location.replace(url.toString());
+          return;
+        }
+
+        if ("serviceWorker" in navigator) {
+          navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister()));
+        }
+        if ("caches" in window) {
+          caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))));
+        }
+      })();
+    </script>
   </head>
   <body>
     <main class="layout">
@@ -64,6 +89,6 @@
       </section>
     </main>
 
-    <script type="module" src="app.js"></script>
+    <script type="module" src="app.js?v=20260326-2"></script>
   </body>
 </html>
