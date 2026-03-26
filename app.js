@@ -8,13 +8,16 @@ const refocusBtn = document.getElementById("refocusBtn");
 const focusState = document.getElementById("focusState");
 
 const SETTINGS = {
-  windowMs: 4200,
-  sampleMs: 140,
-  maxFrames: 24,
+  windowMs: 4500,
+  sampleMs: 180,
+  maxFrames: 20,
+  minFrameQuality: 0.28,
   minZoneQuality: 0.24,
-  minFrameQuality: 0.32,
-  gridCols: 2,
-  gridRows: 4,
+  minTextConfidence: 30,
+  minTextLength: 2,
+  minSupport: 2,
+  gridCols: 3,
+  gridRows: 5,
   zoneMargin: 0.02,
 };
 
@@ -35,8 +38,12 @@ function normalizeText(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
-function normalizeForConsensus(s) {
-  return normalizeText(s).toUpperCase().replace(/[|]/g, "I");
+function canonicalText(s) {
+  return normalizeText(s)
+    .toUpperCase()
+    .replace(/[|]/g, "I")
+    .replace(/[“”"'`´]/g, "")
+    .replace(/\s+/g, " ");
 }
 
 function frameToCanvas(videoEl) {
@@ -46,20 +53,6 @@ function frameToCanvas(videoEl) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
   return canvas;
-}
-
-function cropCanvas(sourceCanvas, rect) {
-  const x = Math.round(rect.x);
-  const y = Math.round(rect.y);
-  const w = Math.max(1, Math.round(rect.w));
-  const h = Math.max(1, Math.round(rect.h));
-
-  const out = document.createElement("canvas");
-  out.width = w;
-  out.height = h;
-  const ctx = out.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
-  return out;
 }
 
 function preprocessCanvas(inputCanvas) {
@@ -75,31 +68,40 @@ function preprocessCanvas(inputCanvas) {
   for (let i = 0; i < img.data.length; i += 4) {
     const g = Math.round((img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3);
     const centered = g - 128;
-    const contrast = clamp(128 + centered * 1.28, 0, 255);
+    const contrast = clamp(128 + centered * 1.35, 0, 255);
     img.data[i] = contrast;
     img.data[i + 1] = contrast;
     img.data[i + 2] = contrast;
   }
-
   ctx.putImageData(img, 0, 0);
   return out;
 }
 
-function zoneQuality(zoneCanvas) {
-  const ctx = zoneCanvas.getContext("2d", { willReadFrequently: true });
-  const { data, width, height } = ctx.getImageData(0, 0, zoneCanvas.width, zoneCanvas.height);
+function cropCanvas(sourceCanvas, rect) {
+  const x = Math.round(rect.x);
+  const y = Math.round(rect.y);
+  const w = Math.max(1, Math.round(rect.w));
+  const h = Math.max(1, Math.round(rect.h));
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
+  return out;
+}
+
+function frameQuality(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
   const gray = new Uint8Array(width * height);
   let mean = 0;
-  let bright = 0;
 
   for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
     const g = Math.round((data[i] + data[i + 1] + data[i + 2]) / 3);
     gray[p] = g;
     mean += g;
-    if (g > 245) bright += 1;
   }
-
   mean /= gray.length;
 
   let variance = 0;
@@ -113,23 +115,49 @@ function zoneQuality(zoneCanvas) {
   for (let y = 1; y < height - 1; y += 1) {
     for (let x = 1; x < width - 1; x += 1) {
       const idx = y * width + x;
-      const gx = gray[idx + 1] - gray[idx - 1];
-      const gy = gray[idx + width] - gray[idx - width];
-      grad += Math.abs(gx) + Math.abs(gy);
+      grad += Math.abs(gray[idx + 1] - gray[idx - 1]) + Math.abs(gray[idx + width] - gray[idx - width]);
     }
   }
 
-  const sharp = clamp(grad / Math.max(1, (width - 2) * (height - 2) * 26), 0, 1);
-  const contrast = clamp(variance / 2200, 0, 1);
-  const exposure = 1 - clamp((bright / gray.length) * 1.7, 0, 1);
-
-  return clamp(0.62 * sharp + 0.24 * contrast + 0.14 * exposure, 0, 1);
+  const sharp = clamp(grad / Math.max(1, (width - 2) * (height - 2) * 24), 0, 1);
+  const contrast = clamp(variance / 2400, 0, 1);
+  return clamp(0.68 * sharp + 0.32 * contrast, 0, 1);
 }
 
-function buildGrid(frameW, frameH) {
+function levenshtein(a, b) {
+  const s = a || "";
+  const t = b || "";
+  const m = s.length;
+  const n = t.length;
+  if (!m) return n;
+  if (!n) return m;
+
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i += 1) dp[i][0] = i;
+  for (let j = 0; j <= n; j += 1) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i += 1) {
+    for (let j = 1; j <= n; j += 1) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+
+  return dp[m][n];
+}
+
+function similarity(a, b) {
+  const s = canonicalText(a);
+  const t = canonicalText(b);
+  if (!s || !t) return 0;
+  const dist = levenshtein(s, t);
+  return 1 - dist / Math.max(s.length, t.length);
+}
+
+function buildZones(frameW, frameH) {
   const zones = [];
-  const cw = frameW / SETTINGS.gridCols;
-  const ch = frameH / SETTINGS.gridRows;
+  const cellW = frameW / SETTINGS.gridCols;
+  const cellH = frameH / SETTINGS.gridRows;
 
   for (let r = 0; r < SETTINGS.gridRows; r += 1) {
     for (let c = 0; c < SETTINGS.gridCols; c += 1) {
@@ -137,254 +165,151 @@ function buildGrid(frameW, frameH) {
         id: `z_${r}_${c}`,
         row: r,
         col: c,
-        x: c * cw + cw * SETTINGS.zoneMargin,
-        y: r * ch + ch * SETTINGS.zoneMargin,
-        w: cw * (1 - SETTINGS.zoneMargin * 2),
-        h: ch * (1 - SETTINGS.zoneMargin * 2),
+        x: c * cellW + cellW * SETTINGS.zoneMargin,
+        y: r * cellH + cellH * SETTINGS.zoneMargin,
+        w: cellW * (1 - SETTINGS.zoneMargin * 2),
+        h: cellH * (1 - SETTINGS.zoneMargin * 2),
       });
     }
   }
+
   return zones;
-}
-
-function collectZoneCandidates(frames, zones) {
-  const byZone = new Map();
-  for (const z of zones) byZone.set(z.id, []);
-
-  for (const frame of frames) {
-    for (const zone of zones) {
-      const zoneCanvas = cropCanvas(frame.canvas, zone);
-      const quality = zoneQuality(zoneCanvas);
-      byZone.get(zone.id).push({
-        frameIndex: frame.index,
-        row: zone.row,
-        col: zone.col,
-        zoneCanvas,
-        quality,
-      });
-    }
-  }
-
-  for (const [zoneId, list] of byZone.entries()) {
-    list.sort((a, b) => b.quality - a.quality);
-    byZone.set(zoneId, list.slice(0, 4));
-  }
-
-  return byZone;
-}
-
-function buildComposite(zones, candidatesByZone, frameW, frameH) {
-  const composite = document.createElement("canvas");
-  composite.width = frameW;
-  composite.height = frameH;
-  const ctx = composite.getContext("2d", { willReadFrequently: true });
-
-  for (const zone of zones) {
-    const list = candidatesByZone.get(zone.id) || [];
-    const chosen = list.find((x) => x.quality >= SETTINGS.minZoneQuality) || list[0];
-    if (!chosen) continue;
-
-    ctx.drawImage(
-      chosen.zoneCanvas,
-      0,
-      0,
-      chosen.zoneCanvas.width,
-      chosen.zoneCanvas.height,
-      Math.round(zone.x),
-      Math.round(zone.y),
-      Math.round(zone.w),
-      Math.round(zone.h)
-    );
-  }
-
-  return composite;
 }
 
 async function ensureWorker() {
   if (worker) return worker;
   worker = await Tesseract.createWorker("spa+eng", 1);
-  return worker;
-}
-
-async function ocrCanvas(canvas, psm = 6) {
-  const w = await ensureWorker();
-  await w.setParameters({
-    tessedit_pageseg_mode: String(psm),
+  await worker.setParameters({
+    tessedit_pageseg_mode: "6",
     preserve_interword_spaces: "1",
     user_defined_dpi: "300",
   });
-
-  const direct = await w.recognize(canvas);
-  const pre = preprocessCanvas(canvas);
-  const enhanced = await w.recognize(pre);
-
-  const d = { text: normalizeText(direct.data.text), confidence: direct.data.confidence || 0 };
-  const e = { text: normalizeText(enhanced.data.text), confidence: enhanced.data.confidence || 0 };
-  return e.confidence > d.confidence ? e : d;
+  return worker;
 }
 
-function pickConsensus(readings) {
-  const groups = new Map();
+async function ocrZone(canvas) {
+  const w = await ensureWorker();
 
-  for (const r of readings) {
-    const norm = normalizeForConsensus(r.text);
-    if (!norm) continue;
+  const direct = await w.recognize(canvas);
+  const enhancedCanvas = preprocessCanvas(canvas);
+  const enhanced = await w.recognize(enhancedCanvas);
 
-    if (!groups.has(norm)) {
-      groups.set(norm, {
-        text: r.text,
-        norm,
-        count: 0,
-        score: 0,
-      });
-    }
+  const dText = normalizeText(direct.data?.text || "");
+  const eText = normalizeText(enhanced.data?.text || "");
+  const dConf = Number(direct.data?.confidence || 0);
+  const eConf = Number(enhanced.data?.confidence || 0);
 
-    const g = groups.get(norm);
-    g.count += 1;
-    g.score += 1.5 + (r.confidence / 100) + r.quality;
-    if (r.confidence > (g.bestConfidence || 0)) {
-      g.bestConfidence = r.confidence;
-      g.text = r.text;
-    }
-  }
-
-  if (!groups.size) return { text: "", support: 0, score: 0 };
-  const winner = [...groups.values()].sort((a, b) => b.score - a.score || b.count - a.count)[0];
-  return { text: normalizeText(winner.text), support: winner.count, score: winner.score };
+  if (eConf > dConf) return { text: eText, confidence: eConf };
+  return { text: dText, confidence: dConf };
 }
 
 function bestSuffixPrefixOverlap(left, right, minLen = 3) {
-  const a = normalizeForConsensus(left);
-  const b = normalizeForConsensus(right);
-  const maxLen = Math.min(a.length, b.length, 28);
+  const a = canonicalText(left);
+  const b = canonicalText(right);
+  const maxLen = Math.min(a.length, b.length, 24);
 
   for (let len = maxLen; len >= minLen; len -= 1) {
-    const suffix = a.slice(-len);
-    const prefix = b.slice(0, len);
-    if (suffix === prefix) {
-      return suffix;
-    }
+    if (a.slice(-len) === b.slice(0, len)) return a.slice(-len);
   }
 
   return "";
 }
 
-function isInformativeAnchor(anchor) {
-  if (!anchor || anchor.length < 3) return false;
-  const unique = new Set(anchor.split(""));
-  const alnum = anchor.replace(/[^A-Z0-9]/g, "");
-  if (alnum.length < 3) return false;
-  if (unique.size < 2 && anchor.length < 6) return false;
-  return true;
+function informativeOverlap(s) {
+  if (!s || s.length < 3) return false;
+  const uniq = new Set(s.split(""));
+  return uniq.size >= 2;
 }
 
-function getAnchorStats(leftReads, rightReads) {
-  const stats = new Map();
+function pickZoneConsensus(reads) {
+  const groups = [];
 
-  for (const l of leftReads) {
-    for (const r of rightReads) {
-      const anchor = bestSuffixPrefixOverlap(l.text, r.text, 3);
-      if (!isInformativeAnchor(anchor)) continue;
+  for (const r of reads) {
+    const text = normalizeText(r.text);
+    if (!text || text.length < SETTINGS.minTextLength) continue;
+    if (r.confidence < SETTINGS.minTextConfidence) continue;
 
-      if (!stats.has(anchor)) {
-        stats.set(anchor, { anchor, support: 0, score: 0 });
+    let target = null;
+    for (const g of groups) {
+      if (similarity(text, g.text) >= 0.8) {
+        target = g;
+        break;
       }
+    }
 
-      const item = stats.get(anchor);
-      item.support += 1;
-      item.score += (l.confidence / 100) + (r.confidence / 100) + l.quality + r.quality;
+    if (!target) {
+      groups.push({
+        text,
+        support: 1,
+        score: (r.confidence / 100) + r.quality,
+        bestConfidence: r.confidence,
+      });
+      continue;
+    }
+
+    target.support += 1;
+    target.score += (r.confidence / 100) + r.quality;
+    if (r.confidence > target.bestConfidence) {
+      target.bestConfidence = r.confidence;
+      target.text = text;
     }
   }
 
-  if (!stats.size) return null;
-
-  return [...stats.values()].sort((a, b) => {
-    if (b.support !== a.support) return b.support - a.support;
-    if (b.anchor.length !== a.anchor.length) return b.anchor.length - a.anchor.length;
-    return b.score - a.score;
-  })[0];
+  if (!groups.length) return null;
+  return groups.sort((a, b) => b.support - a.support || b.score - a.score)[0];
 }
 
-function mergeWithAnchor(left, right, anchor) {
-  const a = normalizeText(left);
-  const b = normalizeText(right);
-  const an = normalizeForConsensus(anchor);
-  if (!an) return normalizeText(`${a} ${b}`);
-
-  const aNorm = normalizeForConsensus(a);
-  const bNorm = normalizeForConsensus(b);
-  const idxA = aNorm.lastIndexOf(an);
-  const idxB = bNorm.indexOf(an);
-
-  if (idxA < 0 || idxB < 0) return normalizeText(`${a} ${b}`);
-
-  const cutA = a.slice(0, idxA + an.length);
-  const tailB = b.slice(idxB + an.length);
-  return normalizeText(`${cutA}${tailB ? ` ${tailB}` : ""}`);
+function anchorBetween(leftReads, rightReads) {
+  const bag = new Map();
+  for (const l of leftReads) {
+    for (const r of rightReads) {
+      const o = bestSuffixPrefixOverlap(l.text, r.text, 3);
+      if (!informativeOverlap(o)) continue;
+      const k = o;
+      if (!bag.has(k)) bag.set(k, { overlap: o, support: 0, score: 0 });
+      const item = bag.get(k);
+      item.support += 1;
+      item.score += (l.confidence / 100) + (r.confidence / 100);
+    }
+  }
+  if (!bag.size) return null;
+  return [...bag.values()].sort((a, b) => b.support - a.support || b.overlap.length - a.overlap.length || b.score - a.score)[0];
 }
 
-function assembleRowFromPieces(pieces) {
+function mergeByOverlap(a, b, overlap) {
+  const left = normalizeText(a);
+  const right = normalizeText(b);
+  const ov = canonicalText(overlap);
+  if (!ov) return normalizeText(`${left} ${right}`);
+
+  const lNorm = canonicalText(left);
+  const rNorm = canonicalText(right);
+  const idxL = lNorm.lastIndexOf(ov);
+  const idxR = rNorm.indexOf(ov);
+  if (idxL < 0 || idxR < 0) return normalizeText(`${left} ${right}`);
+
+  const leftPart = left.slice(0, idxL + ov.length);
+  const rightTail = right.slice(idxR + ov.length);
+  return normalizeText(`${leftPart}${rightTail ? ` ${rightTail}` : ""}`);
+}
+
+function assembleRow(pieces) {
   if (!pieces.length) return "";
   pieces.sort((a, b) => a.col - b.col);
+  let out = pieces[0].consensus.text;
 
-  let line = pieces[0].consensus;
   for (let i = 1; i < pieces.length; i += 1) {
     const left = pieces[i - 1];
     const right = pieces[i];
-    const anchor = getAnchorStats(left.reads, right.reads);
-
-    if (anchor && anchor.support >= 2 && anchor.anchor.length >= 3) {
-      line = mergeWithAnchor(line, right.consensus, anchor.anchor);
+    const anchor = anchorBetween(left.reads, right.reads);
+    if (anchor && anchor.support >= SETTINGS.minSupport) {
+      out = mergeByOverlap(out, right.consensus.text, anchor.overlap);
     } else {
-      line = normalizeText(`${line} ${right.consensus}`);
+      out = normalizeText(`${out} ${right.consensus.text}`);
     }
   }
 
-  return line;
-}
-
-async function buildZoneRawFallback(zones, candidatesByZone) {
-  const rowPieces = new Map();
-
-  for (const zone of zones) {
-    const list = (candidatesByZone.get(zone.id) || []).filter((x) => x.quality >= SETTINGS.minZoneQuality || x === candidatesByZone.get(zone.id)?.[0]);
-    if (!list.length) continue;
-
-    const reads = [];
-    for (const c of list) {
-      const res = await ocrCanvas(c.zoneCanvas, 7);
-      if (res.confidence < 15 || !res.text || res.text.length < 2) continue;
-      reads.push({ text: res.text, confidence: res.confidence, quality: c.quality });
-    }
-
-    const consensus = pickConsensus(reads);
-    if (!consensus.text || consensus.support < 2) continue;
-
-    if (!rowPieces.has(zone.row)) rowPieces.set(zone.row, []);
-    rowPieces.get(zone.row).push({ col: zone.col, consensus: consensus.text, reads });
-  }
-
-  const rows = [...rowPieces.entries()].sort((a, b) => a[0] - b[0]);
-  const lines = [];
-
-  for (const [, pieces] of rows) {
-    const line = assembleRowFromPieces(pieces);
-    if (line) lines.push(line);
-  }
-
-  return lines.join("\n");
-}
-
-function mergeRawTexts(primary, secondary) {
-  const out = [];
-  const lines = [...primary.split(/\n+/), ...secondary.split(/\n+/)].map((x) => normalizeText(x)).filter(Boolean);
-
-  for (const line of lines) {
-    const dup = out.some((x) => x === line || x.includes(line) || line.includes(x));
-    if (!dup) out.push(line);
-  }
-
-  return out.join("\n");
+  return out;
 }
 
 async function captureFrames() {
@@ -397,9 +322,9 @@ async function captureFrames() {
     const now = performance.now();
     if (now >= nextShot) {
       const canvas = frameToCanvas(video);
-      const quality = zoneQuality(canvas);
-      if (quality >= SETTINGS.minFrameQuality) {
-        frames.push({ index: idx, canvas, quality });
+      const q = frameQuality(canvas);
+      if (q >= SETTINGS.minFrameQuality) {
+        frames.push({ index: idx, canvas, quality: q });
       }
       idx += 1;
       nextShot += SETTINGS.sampleMs;
@@ -413,13 +338,7 @@ async function captureFrames() {
 function updateFocusIndicator() {
   if (!video.videoWidth || !video.videoHeight) return;
   const frame = frameToCanvas(video);
-
-  const w = frame.width * 0.45;
-  const h = frame.height * 0.34;
-  const x = (frame.width - w) / 2;
-  const y = (frame.height - h) / 2;
-  const center = cropCanvas(frame, { x, y, w, h });
-  const q = zoneQuality(center);
+  const q = frameQuality(frame);
   focusState.textContent = `Foco: ${Math.round(q * 100)}%`;
 }
 
@@ -428,7 +347,7 @@ async function applyTrackConstraints(constraints) {
   try {
     await track.applyConstraints({ advanced: [constraints] });
   } catch {
-    // no-op en dispositivos sin soporte
+    // dispositivo sin soporte
   }
 }
 
@@ -441,7 +360,6 @@ async function setupCameraCapabilities() {
     zoomSlider.min = String(capabilities.zoom.min || 1);
     zoomSlider.max = String(capabilities.zoom.max || 1);
     zoomSlider.step = String(capabilities.zoom.step || 0.1);
-
     const settings = track.getSettings ? track.getSettings() : {};
     zoomSlider.value = String(settings.zoom || capabilities.zoom.min || 1);
   } else {
@@ -487,7 +405,7 @@ async function startCamera() {
   captureBtn.disabled = false;
   stopCameraBtn.disabled = false;
   startCameraBtn.disabled = true;
-  focusState.textContent = "Foco: listo (toca video para reenfocar)";
+  focusState.textContent = "Foco: listo";
 }
 
 function stopCamera() {
@@ -509,25 +427,51 @@ async function captureAndComposeRawOCR() {
   if (!stream) return;
 
   captureBtn.disabled = true;
-  finalRaw.textContent = "Procesando OCR bruto...";
+  finalRaw.textContent = "Procesando OCR...";
 
   try {
     const frames = await captureFrames();
     if (!frames.length) throw new Error("No se capturaron frames legibles");
 
-    const frameW = frames[0].canvas.width;
-    const frameH = frames[0].canvas.height;
-    const zones = buildGrid(frameW, frameH);
-    const byZone = collectZoneCandidates(frames, zones);
+    const zones = buildZones(frames[0].canvas.width, frames[0].canvas.height);
+    const rowMap = new Map();
 
-    const composite = buildComposite(zones, byZone, frameW, frameH);
-    const whole = await ocrCanvas(composite, 6);
-    const zoneMerged = await buildZoneRawFallback(zones, byZone);
+    for (const zone of zones) {
+      const candidates = [];
+      for (const frame of frames) {
+        const zoneCanvas = cropCanvas(frame.canvas, zone);
+        const q = frameQuality(zoneCanvas);
+        if (q < SETTINGS.minZoneQuality) continue;
+        candidates.push({ zoneCanvas, quality: q });
+      }
 
-    const finalText =
-      (whole.confidence >= 45 ? mergeRawTexts(whole.text, zoneMerged) : zoneMerged) ||
-      (whole.confidence >= 55 ? whole.text : "");
-    finalRaw.textContent = finalText || "No legible todavía. Acércate más, usa zoom y reenfoca.";
+      candidates.sort((a, b) => b.quality - a.quality);
+      const top = candidates.slice(0, 5);
+      if (!top.length) continue;
+
+      const reads = [];
+      for (const c of top) {
+        const res = await ocrZone(c.zoneCanvas);
+        if (!res.text) continue;
+        reads.push({ text: res.text, confidence: res.confidence, quality: c.quality });
+      }
+
+      const consensus = pickZoneConsensus(reads);
+      if (!consensus || consensus.support < SETTINGS.minSupport) continue;
+
+      if (!rowMap.has(zone.row)) rowMap.set(zone.row, []);
+      rowMap.get(zone.row).push({ col: zone.col, reads, consensus });
+    }
+
+    const rows = [...rowMap.entries()].sort((a, b) => a[0] - b[0]);
+    const finalLines = [];
+    for (const [, pieces] of rows) {
+      const line = assembleRow(pieces);
+      if (line) finalLines.push(line);
+    }
+
+    const finalText = finalLines.join("\n");
+    finalRaw.textContent = finalText || "No legible todavía. Reenfoca y acerca más.";
   } catch (error) {
     finalRaw.textContent = `Error: ${error.message}`;
   } finally {
