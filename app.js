@@ -7,7 +7,7 @@ const modeSelect = document.getElementById("modeSelect");
 const windowMsInput = document.getElementById("windowMs");
 const sampleMsInput = document.getElementById("sampleMs");
 const maxFramesInput = document.getElementById("maxFrames");
-const topKInput = document.getElementById("topK");
+const minZoneQualityInput = document.getElementById("minZoneQuality");
 const templateEditor = document.getElementById("templateEditor");
 const applyTemplateBtn = document.getElementById("applyTemplateBtn");
 const statusEl = document.getElementById("status");
@@ -56,6 +56,11 @@ let template = structuredClone(DEFAULT_TEMPLATE);
 let busy = false;
 let tesseractWorker = null;
 
+function updateVideoLayout() {
+  if (!video.videoWidth || !video.videoHeight) return;
+  document.documentElement.style.setProperty("--video-ratio", `${video.videoWidth} / ${video.videoHeight}`);
+}
+
 function logStatus(message, data) {
   const line = `[${new Date().toLocaleTimeString()}] ${message}`;
   statusEl.textContent = `${line}\n${statusEl.textContent}`.slice(0, 10000);
@@ -84,16 +89,20 @@ function applyTemplateFromEditor() {
 
 async function startCamera() {
   if (stream) return;
+  const isPortraitScreen = window.matchMedia("(orientation: portrait)").matches;
+
   stream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: { ideal: "environment" },
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
+      width: isPortraitScreen ? { ideal: 1080 } : { ideal: 1920 },
+      height: isPortraitScreen ? { ideal: 1920 } : { ideal: 1080 },
     },
     audio: false,
   });
   video.srcObject = stream;
+  video.setAttribute("playsinline", "true");
   await video.play();
+  updateVideoLayout();
   drawOverlay();
   captureBtn.disabled = false;
   stopCameraBtn.disabled = false;
@@ -337,6 +346,18 @@ function validateField(value, kind) {
   return { ok: true, reason: "ok" };
 }
 
+function isLikelyOcrError(normalized, kind, ocrConfidence) {
+  if (!normalized) return true;
+  if (ocrConfidence < 18) return true;
+
+  if (kind === "docNumber" && normalized.length < 6) return true;
+  if (kind === "date" && normalized.length < 8) return true;
+  if (kind === "mrz" && normalized.length < 10) return true;
+  if (kind === "name" && normalized.length < 2) return true;
+
+  return false;
+}
+
 async function ensureWorker() {
   if (tesseractWorker) return tesseractWorker;
   tesseractWorker = await Tesseract.createWorker("spa+eng", 1, {
@@ -349,7 +370,7 @@ async function ensureWorker() {
   return tesseractWorker;
 }
 
-function pickCandidatesByZone(frames, zones, topK) {
+function collectZoneCandidates(frames, zones, minZoneQuality) {
   const byZone = {};
 
   for (const zone of zones) {
@@ -371,7 +392,10 @@ function pickCandidatesByZone(frames, zones, topK) {
 
   for (const zoneId of Object.keys(byZone)) {
     byZone[zoneId].sort((a, b) => b.quality - a.quality);
-    byZone[zoneId] = byZone[zoneId].slice(0, topK);
+    byZone[zoneId] = byZone[zoneId].map((candidate) => ({
+      ...candidate,
+      includeInOcr: candidate.quality >= minZoneQuality,
+    }));
   }
 
   return byZone;
@@ -386,11 +410,11 @@ async function runZoneOCR(candidatesByZone, zonesById) {
     readings[zoneId] = [];
 
     for (const candidate of candidatesByZone[zoneId]) {
-      if (candidate.quality < 0.27) {
+      if (!candidate.includeInOcr) {
         readings[zoneId].push({
           ...candidate,
           skipped: true,
-          skipReason: "zona con calidad baja",
+          skipReason: "zona descartada por calidad",
         });
         continue;
       }
@@ -435,6 +459,11 @@ function consensusForZone(zoneId, zone, zoneReadings) {
   for (const r of validReadings) {
     const normalized = normalizeByKind(r.textRaw, zone.kind);
     const validation = validateField(normalized, zone.kind);
+    const readingLooksWrong = isLikelyOcrError(normalized, zone.kind, r.ocrConfidence || 0);
+
+    if (readingLooksWrong) {
+      continue;
+    }
 
     if (!grouped.has(normalized)) {
       grouped.set(normalized, {
@@ -458,6 +487,17 @@ function consensusForZone(zoneId, zone, zoneReadings) {
     }
     if (validation.ok) g.validationOkCount += 1;
     g.validationReasons.add(validation.reason);
+  }
+
+  if (!grouped.size) {
+    return {
+      zoneId,
+      value: "",
+      confidence: 0,
+      sourceFrame: null,
+      candidates: [],
+      reason: "lecturas-descartadas-como-error",
+    };
   }
 
   const ranked = [...grouped.values()].sort((a, b) => {
@@ -554,9 +594,9 @@ async function captureAndProcess() {
     const windowMs = clamp(Number(windowMsInput.value) || 3000, 1000, 6000);
     const sampleMs = clamp(Number(sampleMsInput.value) || 180, 80, 500);
     const maxFrames = clamp(Number(maxFramesInput.value) || 15, 5, 30);
-    const topK = clamp(Number(topKInput.value) || 5, 2, 10);
+    const minZoneQuality = clamp(Number(minZoneQualityInput.value) || 0.28, 0.05, 0.95);
 
-    logStatus(`Inicio captura modo=${mode} ventana=${windowMs}ms sample=${sampleMs}ms`);
+    logStatus(`Inicio captura modo=${mode} ventana=${windowMs}ms sample=${sampleMs}ms qMin=${minZoneQuality}`);
 
     const frames = [];
     const start = performance.now();
@@ -606,11 +646,11 @@ async function captureAndProcess() {
       throw new Error("No se capturaron frames");
     }
 
-    const candidatesByZone = pickCandidatesByZone(frames, template.zones, topK);
+    const candidatesByZone = collectZoneCandidates(frames, template.zones, minZoneQuality);
 
     for (const [zoneId, cands] of Object.entries(candidatesByZone)) {
-      const qualities = cands.map((c) => c.quality.toFixed(2)).join(", ");
-      logStatus(`Zona ${zoneId}: candidatos=${cands.length} q=[${qualities}]`);
+      const usable = cands.filter((c) => c.includeInOcr).length;
+      logStatus(`Zona ${zoneId}: muestras=${cands.length} paraOCR=${usable}`);
     }
 
     const zonesById = Object.fromEntries(template.zones.map((z) => [z.id, z]));
@@ -644,8 +684,14 @@ applyTemplateBtn.addEventListener("click", applyTemplateFromEditor);
 
 modeSelect.addEventListener("change", drawOverlay);
 window.addEventListener("resize", drawOverlay);
-video.addEventListener("loadedmetadata", drawOverlay);
-video.addEventListener("playing", drawOverlay);
+video.addEventListener("loadedmetadata", () => {
+  updateVideoLayout();
+  drawOverlay();
+});
+video.addEventListener("playing", () => {
+  updateVideoLayout();
+  drawOverlay();
+});
 
 renderTemplateInEditor();
 finalResultEl.textContent = "Esperando captura...";
