@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OCR vídeo por zonas</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  </head>
+  <body>
+    <main class="layout">
+      <section class="panel viewer">
+        <h1>OCR por zonas (vídeo)</h1>
+        <div class="video-wrap">
+          <video id="video" playsinline autoplay muted></video>
+          <canvas id="overlay"></canvas>
+        </div>
+        <div class="actions">
+          <button id="startCameraBtn">Abrir cámara</button>
+          <button id="captureBtn" disabled>Capturar y procesar</button>
+          <button id="stopCameraBtn" disabled>Detener cámara</button>
+        </div>
+        <div class="capture-controls">
+          <label>
+            Modo
+            <select id="modeSelect">
+              <option value="guide">Guía fija</option>
+              <option value="sweep">Barrido por zonas</option>
+            </select>
+          </label>
+          <label>
+            Ventana (ms)
+            <input id="windowMs" type="number" min="1000" max="6000" step="100" value="3000" />
+          </label>
+          <label>
+            Muestreo (ms)
+            <input id="sampleMs" type="number" min="80" max="500" step="10" value="180" />
+          </label>
+          <label>
+            Máx. frames
+            <input id="maxFrames" type="number" min="5" max="30" step="1" value="15" />
+          </label>
+          <label>
+            Top candidatos por zona
+            <input id="topK" type="number" min="2" max="10" step="1" value="5" />
+          </label>
+        </div>
+      </section>
+
+      <section class="panel config">
+        <h2>Plantilla de zonas</h2>
+        <p class="hint">Coordenadas relativas (0..1) dentro del documento.</p>
+        <textarea id="templateEditor"></textarea>
+        <button id="applyTemplateBtn">Aplicar plantilla</button>
+        <h2>Estado</h2>
+        <pre id="status"></pre>
+      </section>
+
+      <section class="panel result">
+        <h2>Resultado final por piezas</h2>
+        <pre id="finalResult"></pre>
+        <h2>Detalle por zona/frame</h2>
+        <pre id="zoneReadings"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
