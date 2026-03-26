@@ -1,3 +1,5 @@
+import { DocumentScanner } from "https://cdn.jsdelivr.net/npm/opencv-document-scanner/dist/opencv-document-scanner.js";
+
 const video = document.getElementById("video");
 const startCameraBtn = document.getElementById("startCameraBtn");
 const captureBtn = document.getElementById("captureBtn");
@@ -8,20 +10,21 @@ const refocusBtn = document.getElementById("refocusBtn");
 const focusState = document.getElementById("focusState");
 
 const SETTINGS = {
-  windowMs: 5200,
-  sampleMs: 140,
-  maxFrames: 28,
+  windowMs: 4200,
+  sampleMs: 180,
+  maxFrames: 16,
   minFrameQuality: 0.2,
-  minZoneQuality: 0.14,
+  minZoneQuality: 0.16,
   gridCols: 4,
   gridRows: 6,
-  overlap: 0.35,
+  overlap: 0.3,
 };
 
 let stream = null;
 let worker = null;
 let track = null;
 let capabilities = null;
+let scanner = null;
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
@@ -57,6 +60,15 @@ function cropCanvas(sourceCanvas, rect) {
   return out;
 }
 
+function resizeCanvas(inputCanvas, targetW, targetH) {
+  const out = document.createElement("canvas");
+  out.width = targetW;
+  out.height = targetH;
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(inputCanvas, 0, 0, targetW, targetH);
+  return out;
+}
+
 function preprocessCanvas(inputCanvas) {
   const scale = inputCanvas.width < 1000 ? 2 : 1;
   const out = document.createElement("canvas");
@@ -68,7 +80,7 @@ function preprocessCanvas(inputCanvas) {
   const img = ctx.getImageData(0, 0, out.width, out.height);
   for (let i = 0; i < img.data.length; i += 4) {
     const g = Math.round((img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3);
-    const c = clamp(128 + (g - 128) * 1.22, 0, 255);
+    const c = clamp(128 + (g - 128) * 1.18, 0, 255);
     img.data[i] = c;
     img.data[i + 1] = c;
     img.data[i + 2] = c;
@@ -106,9 +118,9 @@ function quality(canvas) {
     }
   }
 
-  const sharp = clamp(grad / Math.max(1, (width - 2) * (height - 2) * 24), 0, 1);
+  const sharp = clamp(grad / Math.max(1, (width - 2) * (height - 2) * 22), 0, 1);
   const contrast = clamp(variance / 2400, 0, 1);
-  return clamp(0.7 * sharp + 0.3 * contrast, 0, 1);
+  return clamp(0.68 * sharp + 0.32 * contrast, 0, 1);
 }
 
 function buildZones(frameW, frameH) {
@@ -126,11 +138,31 @@ function buildZones(frameW, frameH) {
       const h = Math.round(tileH);
       if (x + w > frameW) x = frameW - w;
       if (y + h > frameH) y = frameH - h;
-      zones.push({ id: `z_${r}_${c}`, row: r, col: c, x, y, w, h });
+      zones.push({ id: `z_${r}_${c}`, x, y, w, h });
     }
   }
 
   return zones;
+}
+
+async function ensureScanner() {
+  if (scanner) return scanner;
+  await window.cvReady;
+  scanner = new DocumentScanner();
+  return scanner;
+}
+
+async function rectifyDocument(canvas) {
+  try {
+    const s = await ensureScanner();
+    const points = s.detect(canvas, { useCanny: true });
+    if (!points || points.length !== 4) return canvas;
+    const cropped = s.crop(canvas);
+    if (!cropped || !cropped.width || !cropped.height) return canvas;
+    return cropped;
+  } catch {
+    return canvas;
+  }
 }
 
 async function ensureWorker() {
@@ -166,10 +198,11 @@ async function captureFrames() {
   while (performance.now() - start < SETTINGS.windowMs && frames.length < SETTINGS.maxFrames) {
     const now = performance.now();
     if (now >= nextShot) {
-      const canvas = frameToCanvas(video);
-      const q = quality(canvas);
-      if (q >= SETTINGS.minFrameQuality) {
-        frames.push({ index: idx, canvas, quality: q });
+      const raw = frameToCanvas(video);
+      const frameQ = quality(raw);
+      if (frameQ >= SETTINGS.minFrameQuality) {
+        const rectified = await rectifyDocument(raw);
+        frames.push({ index: idx, canvas: rectified, quality: frameQ });
       }
       idx += 1;
       nextShot += SETTINGS.sampleMs;
@@ -181,19 +214,23 @@ async function captureFrames() {
 }
 
 function buildMosaic(frames) {
-  const frameW = frames[0].canvas.width;
-  const frameH = frames[0].canvas.height;
-  const zones = buildZones(frameW, frameH);
+  const widths = frames.map((f) => f.canvas.width).sort((a, b) => a - b);
+  const heights = frames.map((f) => f.canvas.height).sort((a, b) => a - b);
+  const targetW = widths[Math.floor(widths.length / 2)] || frames[0].canvas.width;
+  const targetH = heights[Math.floor(heights.length / 2)] || frames[0].canvas.height;
+
+  const normalized = frames.map((f) => ({ ...f, canvas: resizeCanvas(f.canvas, targetW, targetH) }));
+  const zones = buildZones(targetW, targetH);
 
   const out = document.createElement("canvas");
-  out.width = frameW;
-  out.height = frameH;
+  out.width = targetW;
+  out.height = targetH;
   const ctx = out.getContext("2d", { willReadFrequently: true });
 
   for (const zone of zones) {
     let best = null;
 
-    for (const frame of frames) {
+    for (const frame of normalized) {
       const patch = cropCanvas(frame.canvas, zone);
       const q = quality(patch);
       if (!best || q > best.q) {
@@ -202,7 +239,6 @@ function buildMosaic(frames) {
     }
 
     if (!best || best.q < SETTINGS.minZoneQuality) continue;
-
     ctx.drawImage(best.patch, 0, 0, best.patch.width, best.patch.height, zone.x, zone.y, zone.w, zone.h);
   }
 
@@ -220,7 +256,7 @@ async function applyTrackConstraints(constraints) {
   try {
     await track.applyConstraints({ advanced: [constraints] });
   } catch {
-    // ignore
+    // ignore unsupported constraints
   }
 }
 
