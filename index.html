@@ -6,15 +6,14 @@
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
-    <title>OCR vídeo por zonas</title>
-    <link rel="stylesheet" href="styles.css?v=20260326-2" />
+    <title>OCR bruto</title>
+    <link rel="stylesheet" href="styles.css?v=20260326-5" />
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <script>
       (function () {
-        const BUILD_ID = "20260326-2";
+        const BUILD_ID = "20260326-5";
         const KEY = "ocr26-build-id";
         const prev = localStorage.getItem(KEY);
-
         if (prev !== BUILD_ID) {
           localStorage.setItem(KEY, BUILD_ID);
           const url = new URL(window.location.href);
@@ -22,73 +21,19 @@
           window.location.replace(url.toString());
           return;
         }
-
-        if ("serviceWorker" in navigator) {
-          navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister()));
-        }
-        if ("caches" in window) {
-          caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))));
-        }
       })();
     </script>
   </head>
   <body>
-    <main class="layout">
-      <section class="panel viewer">
-        <h1>OCR por zonas (vídeo)</h1>
-        <div class="video-wrap">
-          <video id="video" playsinline autoplay muted></video>
-          <canvas id="overlay"></canvas>
-        </div>
-        <div class="actions">
-          <button id="startCameraBtn">Abrir cámara</button>
-          <button id="captureBtn" disabled>Capturar y procesar</button>
-          <button id="stopCameraBtn" disabled>Detener cámara</button>
-        </div>
-        <div class="capture-controls">
-          <label>
-            Modo
-            <select id="modeSelect">
-              <option value="guide">Guía fija</option>
-              <option value="sweep">Barrido por zonas</option>
-            </select>
-          </label>
-          <label>
-            Ventana (ms)
-            <input id="windowMs" type="number" min="1000" max="6000" step="100" value="3000" />
-          </label>
-          <label>
-            Muestreo (ms)
-            <input id="sampleMs" type="number" min="80" max="500" step="10" value="180" />
-          </label>
-          <label>
-            Máx. frames
-            <input id="maxFrames" type="number" min="5" max="30" step="1" value="15" />
-          </label>
-          <label>
-            Calidad mínima por zona (0-1)
-            <input id="minZoneQuality" type="number" min="0.05" max="0.95" step="0.01" value="0.28" />
-          </label>
-        </div>
-      </section>
-
-      <section class="panel config">
-        <h2>Plantilla de zonas</h2>
-        <p class="hint">Coordenadas relativas (0..1) dentro del documento. Si `zones` está vacío, se usa rejilla genérica automática (sin plantilla inventada).</p>
-        <textarea id="templateEditor"></textarea>
-        <button id="applyTemplateBtn">Aplicar plantilla</button>
-        <h2>Estado</h2>
-        <pre id="status"></pre>
-      </section>
-
-      <section class="panel result">
-        <h2>Resultado final por piezas</h2>
-        <pre id="finalResult"></pre>
-        <h2>Detalle por zona/frame</h2>
-        <pre id="zoneReadings"></pre>
-      </section>
+    <main class="app">
+      <video id="video" playsinline autoplay muted></video>
+      <div class="actions">
+        <button id="startCameraBtn">Abrir cámara</button>
+        <button id="captureBtn" disabled>Capturar OCR</button>
+        <button id="stopCameraBtn" disabled>Detener cámara</button>
+      </div>
+      <pre id="finalRaw">Esperando captura...</pre>
     </main>
-
-    <script type="module" src="app.js?v=20260326-2"></script>
+    <script type="module" src="app.js?v=20260326-5"></script>
   </body>
 </html>
